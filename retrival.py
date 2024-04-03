@@ -149,14 +149,16 @@ def cal_colbert_score(q_reps, p_reps, q_mask: torch.Tensor, temperature=1.0):
     return scores
 
 class retrival_model:
-    def __init__(self,tokenizer_path:Path='../internlm2-7B', bgem3_list_file_path:str='./bgem3_output/3body.txt.pkl', model_name: str='BAAI/bge-m3', use_dense_and_lexical_score=True, use_colbert_score=True, use_fp16=True, book_dir:Path='./book_dir', middle_files_dir:Path='./datas'):
+    def __init__(self,tokenizer_path:Path='../internlm2-7B', bgem3_list_file_path:str='./bgem3_output/3body.pkl', model_name: str='BAAI/bge-m3', use_dense_score=True, use_lexical_score=True, use_colbert_score=True, use_fp16=True, book_dir:Path='./book_dir', middle_files_dir:Path='./datas'):
         self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16)
         self.splitter = ChineseRecursiveTextSplitter()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        if not use_dense_and_lexical_score and not use_colbert_score:
-            raise ValueError("At least one of use_dense_and_lexical_score and use_colbert_score should be True")
-        self.use_dense_and_lexical_score = use_dense_and_lexical_score
+        if not use_dense_score and not use_colbert_score and not use_lexical_score:
+            raise ValueError("At least one of use_dense_score, use_lexical_score or use_colbert_score should be True")
+        self.use_dense_score = use_dense_score
+        self.use_lexical_score = use_lexical_score
         self.use_colbert_score = use_colbert_score
+        torch.manual_seed(2)
         
 
         if not os.path.exists(book_dir):
@@ -233,46 +235,66 @@ class retrival_model:
                         for chunk in not_found_list:
                             f.write(chunk + '\n')
 
-    def expand_text(self, queries_meta_list:list[dict], expand_length=0):
-        expanded_queries_meta_list = []
-        for query_meta_list in queries_meta_list:
-            expanded_query_meta_list = []
-            for sentence_meta in query_meta_list:
-                expanded_text, _ = find_and_expand(sentence_meta['content'], self.book_dir, expansion_length=expand_length)
-                if expanded_text is None:
-                    print(f"Failed to expand text: {sentence_meta['content']}")
-                    expanded_query_meta_list.append(sentence_meta)
-                    continue
-                _, cat_text, position_idx_record = read_lookup_table(self.middle_files_dir/sentence_meta['doc'])
-                start, end = find_text_indices(expanded_text, cat_text, position_idx_record)
-                output = self.model.encode(expanded_text, return_dense=True, return_sparse=True, return_colbert_vecs=True)
-                expended_sentence_meta = {}
-                expended_sentence_meta['content'] = expanded_text
-                expended_sentence_meta['start'] = start
-                expended_sentence_meta['end'] = end
-                expended_sentence_meta['doc'] = sentence_meta['doc']
-                expended_sentence_meta['query'] = sentence_meta['query']
-            expanded_queries_meta_list.append(expanded_query_meta_list)
-        return expanded_queries_meta_list
 
-    def retrive_data(self, queries, top_k=5, expand_length=0, is_merge_overlaped=False):
-        # 对queries进行检索
-        score_list = self.compute_score(queries)
-        queries_top_k_idx = self.get_top_k_idx(score_list, top_k)
+    def expand_text(self, expand_length=0, queries_top_k_idx=None, queries=None):
+        expanded_head_target = expand_length//2
+        expanded_tail_target = expand_length - expanded_head_target
         queries_meta_list = []
         for i, top_k_idx_list in enumerate(queries_top_k_idx):
             query_meta_list = []
             for idx in top_k_idx_list:
-                sentence_meta = {}
-                sentence_meta['content'] = self.bgem3_list[idx]['content']
-                sentence_meta['start'] = self.bgem3_list[idx]['start']
-                sentence_meta['end'] = self.bgem3_list[idx]['end']
-                sentence_meta['doc'] = self.bgem3_list[idx]['doc']
-                sentence_meta['query'] = queries[i]
-                query_meta_list.append(sentence_meta)
+                expand_len = 0
+                text = self.bgem3_list[idx]['content']
+                doc = self.bgem3_list[idx]['doc']
+                start = self.bgem3_list[idx]['start']
+                end = self.bgem3_list[idx]['end']
+                # expand forward
+                p_idx = idx - 1
+                while(expand_len < expanded_head_target and p_idx >= 0):
+                    expand_len += len(self.bgem3_list[p_idx]['content'])
+                    start = self.bgem3_list[p_idx]['start']
+                    text = self.bgem3_list[p_idx]['content'] + text
+                    p_idx -= 1
+                
+                # expand backward
+                n_idx = idx + 1
+                expand_len = 0
+                while(expand_len < expanded_tail_target and n_idx < len(self.bgem3_list)):
+                    expand_len += len(self.bgem3_list[n_idx]['content'])
+                    end = self.bgem3_list[n_idx]['end']
+                    text += self.bgem3_list[n_idx]['content']
+                    n_idx += 1
+
+                query_meta = {}
+                query_meta['content'] = text
+                query_meta['start'] = start
+                query_meta['end'] = end
+                query_meta['doc'] = doc
+                query_meta['query'] = queries[i]
+                query_meta_list.append(query_meta)
             queries_meta_list.append(query_meta_list)
-        if expand_length != 0:
-            queries_meta_list = self.expand_text(queries_meta_list, expand_length)
+
+        return queries_meta_list
+
+    def retrive_data(self, queries, top_k=5, expand_length=0, is_merge_overlaped=False, use_dense_score=True, use_lexical_score=True, use_colbert_score=True, weights_for_different_modes=None):
+        # 对queries进行检索
+        score_list = self.compute_score(queries, weights_for_different_modes=weights_for_different_modes)
+        queries_top_k_idx = self.get_top_k_idx(score_list, top_k)
+        if expand_length == 0:
+            queries_meta_list = []
+            for i, top_k_idx_list in enumerate(queries_top_k_idx):
+                query_meta_list = []
+                for idx in top_k_idx_list:
+                    sentence_meta = {}
+                    sentence_meta['content'] = self.bgem3_list[idx]['content']
+                    sentence_meta['start'] = self.bgem3_list[idx]['start']
+                    sentence_meta['end'] = self.bgem3_list[idx]['end']
+                    sentence_meta['doc'] = self.bgem3_list[idx]['doc']
+                    sentence_meta['query'] = queries[i]
+                    query_meta_list.append(sentence_meta)
+                queries_meta_list.append(query_meta_list)
+        else:
+            queries_meta_list = self.expand_text(expand_length, queries_top_k_idx, queries)
 
         return queries_meta_list
     
@@ -286,38 +308,45 @@ class retrival_model:
         return query_score_top_k_idx
 
         
-    def compute_score(self, queries:list[str], query_batch_size:int=256, weights_for_different_modes: list[float] = None):        
+    def compute_score(self, queries:list[str], weights_for_different_modes: list[float] = None):        
         queries_score_list = []
         for query in queries:
             score_list = []
             query_output = self.model.encode(query, return_dense=True, return_sparse=True, return_colbert_vecs=True)
 
             for sentence in self.bgem3_list:
-                if self.use_dense_and_lexical_score:
-                    dense_score = query_output['dense_vecs']@ sentence['dense_vecs'].T
-                    lexical_weights_score = self.model.compute_lexical_matching_score(query_output['lexical_weights'], sentence['lexical_weights'])
-                if self.use_colbert_score:
-                    colbert_score = self.model.colbert_score(query_output['colbert_vecs'], sentence['colbert_vecs'])
-                
                 if weights_for_different_modes is None:
                     weights_for_different_modes = [1, 1., 1.]
                     weight_sum = 0
-                    if self.use_dense_and_lexical_score == True:
-                        weight_sum += 2
+                    if self.use_dense_score == True:
+                        weight_sum += 1
+                    if self.use_lexical_score == True:
+                        weight_sum += 1
                     if self.use_colbert_score == True:
                         weight_sum += 1
-                    print("default weights for dense, lexical_weights, colbert are [1.0, 1.0, 1.0] or [1.0, 1.0] ")
+                    print("default weights for dense, lexical_weights, colbert are [1.0, 1.0, 1.0]")
                 else:
-                    if self.use_dense_and_lexical_score:
-                        weight_sum += sum(weights_for_different_modes[:2])
+                    weight_sum = 0
+                    assert len(weights_for_different_modes) == 3
+                    if self.use_dense_score:
+                        weight_sum += weights_for_different_modes[0]
+                    if self.use_lexical_score:
+                        weight_sum += weights_for_different_modes[1]
                     if self.use_colbert_score:
                         weight_sum += weights_for_different_modes[2]
+                
                 all_score = 0
-                if self.use_dense_and_lexical_score:
-                    all_score += dense_score * weights_for_different_modes[0] + lexical_weights_score * weights_for_different_modes[1]
-
+                if self.use_dense_score:
+                    dense_score = query_output['dense_vecs']@ sentence['dense_vecs'].T
+                    all_score += dense_score * weights_for_different_modes[0]
+                if self.use_lexical_score:
+                    lexical_weights_score = self.model.compute_lexical_matching_score(query_output['lexical_weights'], sentence['lexical_weights'])
+                    all_score += lexical_weights_score * weights_for_different_modes[1]
                 if self.use_colbert_score:
+                    colbert_score = self.model.colbert_score(query_output['colbert_vecs'], sentence['colbert_vecs'])
                     all_score += colbert_score * weights_for_different_modes[2]
+                
+
 
                 all_score = all_score/weight_sum 
 
