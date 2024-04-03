@@ -10,48 +10,6 @@ from FlagEmbedding import BGEM3FlagModel
 from FlagEmbedding.BGE_M3 import BGEM3ForInference
 import torch
 
-def find_and_expand(target_str, folder_path, expansion_length=1000, start_ignore=0, end_ignore=0):
-    # 将目标字符串转换为一个正则表达式，允许在其字符之间存在最多为n的空白字符
-    target_regex = re.compile(".{0,10}".join(map(re.escape, target_str)), re.DOTALL)
-
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            file_path = os.path.join(root, file)
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    assert len(content) >= start_ignore + end_ignore, f"File {file_path} is too short"
-                    content = content[start_ignore:-end_ignore]
-                    # 首先尝试直接搜索目标字符串
-                    index = content.find(target_str)
-                    # 如果直接搜索失败，则尝试使用正则表达式搜索
-                    if index == -1:
-                        match = target_regex.search(content)
-                        if match:
-                            index = match.start()
-                    # 如果找到了匹配项, 无论是直接搜索还是正则搜索
-                    if index != -1:
-                        start = max(0, index - expansion_length // 2)
-                        end = min(
-                            len(content),
-                            index + len(target_str) + expansion_length // 2,
-                        )
-                        # 找到开始和结束点附近的分隔符，以保持句子完整性
-                        start = content.rfind("\n", 0, start)
-                        if start == -1:
-                            start = 0
-                        else:
-                            start += 1
-                        end = content.find("\n", end)
-                        if end == -1:
-                            end = len(content) - 1
-                        expanded_str = content[start:end]
-                        return expanded_str, file
-            except Exception as e:
-                print(f"Error reading {file_path}: {e}")
-
-    print(f"Target string not found in any file. {target_str}")
-    return None, None
 
 def read_lookup_table(file_path):
     lookup_table = []
@@ -149,7 +107,7 @@ def cal_colbert_score(q_reps, p_reps, q_mask: torch.Tensor, temperature=1.0):
     return scores
 
 class retrival_model:
-    def __init__(self,tokenizer_path:Path='../internlm2-7B', bgem3_list_file_path:str='./bgem3_output/3body.pkl', model_name: str='BAAI/bge-m3', use_dense_score=True, use_lexical_score=True, use_colbert_score=True, use_fp16=True, book_dir:Path='./book_dir', middle_files_dir:Path='./datas'):
+    def __init__(self, chunk_size=250, chunk_overlap=0, tokenizer_path:Path='../internlm2-7B', bgem3_list_file_path:str='./bgem3_output/3body.pkl', model_name: str='BAAI/bge-m3', use_dense_score=True, use_lexical_score=True, use_colbert_score=True, use_fp16=True, book_dir:Path='./book_dir', middle_files_dir:Path='./datas'):
         self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16)
         self.splitter = ChineseRecursiveTextSplitter()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -170,7 +128,9 @@ class retrival_model:
         
 
         if not os.path.exists(bgem3_list_file_path):
-            raise FileNotFoundError(f"File {bgem3_list_file_path} not found")
+            # raise FileNotFoundError(f"File {bgem3_list_file_path} not found")
+            print(f"File {bgem3_list_file_path} not found, start to preprocess data")
+            self.preprocess_data(chunk_size=250, chunk_overlap=0, book_path=book_dir, middle_files_dir=middle_files_dir)
         with open(bgem3_list_file_path, "rb") as file:
             self.bgem3_list = pickle.load(file)
 
@@ -183,13 +143,13 @@ class retrival_model:
             "colbert_vecs": "matrix"
         }
 
-    def preprocess_data(self, chunk_size=250, chunk_overlap=0, book_dir:Path='./input_dir', output_path:Path='./datas/bgem3_output/', middle_files_dir:Path='./datas/tokenized_prompt/'):
+    def preprocess_data(self, chunk_size=250, chunk_overlap=0, book_path:Path='./input_dir', output_path:Path='./output_datas/bgem3_output/', middle_files_dir:Path='./output_datas/tokenized_prompt/'):
         # preprocessing data, split text into chunks and encode them
-        if not os.path.notexists(book_dir):
-            raise FileNotFoundError(f"File {book_dir} not found")
+        if not os.path.exists(book_path):
+            raise FileNotFoundError(f"File {book_path} not found")
         if not os.path.exists(middle_files_dir):
             # tokenize text
-            self.tokenize_file(book_dir, middle_files_dir)
+            tokenize_file(book_path, middle_files_dir)
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         
@@ -201,7 +161,7 @@ class retrival_model:
         )
 
         # walk through all files in input_data
-        for root, _, files in os.walk(book_dir):
+        for root, _, files in os.walk(book_path):
             for file in files:
                 if file.endswith('.txt'):
                     with open(Path(root) / file, 'r', encoding='utf-8') as f:
@@ -212,7 +172,7 @@ class retrival_model:
                         not_found_list = []
                         chunks = text_splitter.split_text(text)
                         for i, chunk in enumerate(chunks):
-                            meta = self.template.copy()
+                            meta = {}
                             start, end = find_text_indices(chunk, cat_text, position_idx_record)
                             if end == None:
                                 not_found_list.append(chunk)
@@ -276,7 +236,16 @@ class retrival_model:
 
         return queries_meta_list
 
-    def retrive_data(self, queries, top_k=5, expand_length=0, is_merge_overlaped=False, use_dense_score=True, use_lexical_score=True, use_colbert_score=True, weights_for_different_modes=None):
+    def retrive_data(self, queries, top_k=5, expand_length=0, is_merge_overlaped=False, use_dense_score=None, use_lexical_score=None, use_colbert_score=None, weights_for_different_modes=None):
+
+        if use_dense_score is not None:
+            self.use_dense_score = use_dense_score
+        if use_lexical_score is not None:
+            self.use_lexical_score = use_lexical_score
+        if use_colbert_score is not None:
+            self.use_colbert_score = use_colbert_score
+        if not self.use_dense_score and not self.use_colbert_score and not self.use_lexical_score:
+            raise ValueError("At least one of use_dense_score, use_lexical_score or use_colbert_score should be True")
         # 对queries进行检索
         score_list = self.compute_score(queries, weights_for_different_modes=weights_for_different_modes)
         queries_top_k_idx = self.get_top_k_idx(score_list, top_k)
