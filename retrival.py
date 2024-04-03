@@ -287,7 +287,7 @@ class retrival_model:
 
         
     def compute_score(self, queries:list[str], query_batch_size:int=256, weights_for_different_modes: list[float] = None):        
-        query_score_list = []
+        queries_score_list = []
         for query in queries:
             score_list = []
             query_output = self.model.encode(query, return_dense=True, return_sparse=True, return_colbert_vecs=True)
@@ -308,8 +308,10 @@ class retrival_model:
                         weight_sum += 1
                     print("default weights for dense, lexical_weights, colbert are [1.0, 1.0, 1.0] or [1.0, 1.0] ")
                 else:
-                    weight_sum = sum(weights_for_different_modes)
-                
+                    if self.use_dense_and_lexical_score:
+                        weight_sum += sum(weights_for_different_modes[:2])
+                    if self.use_colbert_score:
+                        weight_sum += weights_for_different_modes[2]
                 all_score = 0
                 if self.use_dense_and_lexical_score:
                     all_score += dense_score * weights_for_different_modes[0] + lexical_weights_score * weights_for_different_modes[1]
@@ -320,5 +322,5 @@ class retrival_model:
                 all_score = all_score/weight_sum 
 
                 score_list.append(all_score)
-            query_score_list.append(score_list)
-        return query_score_list
+            queries_score_list.append(score_list)
+        return queries_score_list
