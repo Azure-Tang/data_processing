@@ -34,7 +34,7 @@ def merge_strings(str1: str, str2: str) -> str:
     return str1 + str2
 
 def merge_same_content(data: List[dict]) -> List[dict]:
-    # 按 doc_id 分组
+    # 按 doc 分组
     grouped_data = {}
     for item in data:
         if item['doc'] not in grouped_data:
@@ -156,8 +156,11 @@ def cal_colbert_score(q_reps, p_reps, q_mask: torch.Tensor, temperature=1.0):
     scores = scores / temperature
     return scores
 
-class retrival_model:
+class retrivalModel:
     def __init__(self, chunk_size=250, chunk_overlap=0, tokenizer_path:Path='../internlm2-7B', bgem3_list_file_path:Path='./bgem3_output/3body.pkl', model_name: Path='BAAI/bge-m3', use_dense_score=True, use_lexical_score=True, use_colbert_score=True, use_fp16=True, book_dir:Path='./book_dir', middle_files_dir:Path='./output_datas/tokenized_prompt/'):
+        seed = 3
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
         self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16)
         self.splitter = ChineseRecursiveTextSplitter()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -166,7 +169,7 @@ class retrival_model:
         self.use_dense_score = use_dense_score
         self.use_lexical_score = use_lexical_score
         self.use_colbert_score = use_colbert_score
-        torch.manual_seed(2)
+        self.middle_files_dir = middle_files_dir
         
 
         if not os.path.exists(book_dir):
