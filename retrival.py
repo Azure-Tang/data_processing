@@ -81,31 +81,26 @@ def read_lookup_table(file_path):
         position_idx_record+=[idx]*len(token_string)
     return lookup_table, cat_text, position_idx_record
 
-def find_text_indices(text, cat_text, position_idx_record, n=20):
-    # 取巧只匹配段落的前20个和后20个字符来定位整段的位置
+
+def find_text_indices(text, lookup_table, cat_text, position_idx_record):
     # 初始化 start_idx 和 end_idx 为 None
-    start_idx = end_idx = None
+    start_idx = end_idx = -1
 
-    # 通过头，尾各取20个字符，查找text在cat_text中的位置
-    start_txt = text[:n]
-    end_txt = text[-n:]
-
-    start_idx = cat_text.find(start_txt)
-    # 如果直接搜索失败，则尝试使用正则表达式搜索
     if start_idx == -1:
-        target_regex = re.compile(".{0,10}".join(map(re.escape, text)), re.DOTALL)
+        target_regex = re.compile(".{0,5}".join(map(re.escape, text)), re.DOTALL)
         match = target_regex.search(cat_text)
         if match:
             start_idx = match.start()
     
-    end_idx = cat_text.find(end_txt) + len(end_txt) - 1
-    # 如果直接搜索失败，则尝试使用正则表达式搜索
     if end_idx == -1:
-        target_regex = re.compile(".{0,10}".join(map(re.escape, text)), re.DOTALL)
+        target_regex = re.compile(".{0,5}".join(map(re.escape, text)), re.DOTALL)
         match = target_regex.search(cat_text)
         if match:
             end_idx = match.end()
     
+    if end_idx <= start_idx:
+        end_idx = start_idx = -1
+
     if start_idx != -1 and end_idx != -1:
         start_idx = position_idx_record[start_idx]
         end_idx = position_idx_record[end_idx]
@@ -114,7 +109,7 @@ def find_text_indices(text, cat_text, position_idx_record, n=20):
 
     else:
         # raise Exception(f"Failed to find text: {text[:10]}")
-        print(f"Failed to find text: {text[:n]}")
+        print(f"Failed to find text: {text[:10]}")
         return text, None
 
 def tokenize_file(tokenizer, book_path_dir:Path, output_path:Path=Path('./output_datas/tokenized_prompt/')):
